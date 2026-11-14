@@ -8,6 +8,21 @@
 - 搜尋、標籤、收藏；材料數量可依倍數自動換算；做菜時可點選劃掉材料與步驟
 - 可離線使用；所有資料只存在手機瀏覽器（IndexedDB），不會上傳
 - 設定頁可匯出／匯入 JSON 備份
+- **營養**：查詢食材營養成分；食譜的材料對應到食品後，自動估算整道菜與每份的營養
+
+## 營養資料
+
+來源是衛福部食藥署的[食品營養成分資料集](https://data.gov.tw/dataset/8543)，依政府資料開放授權條款第 1 版使用（App 內已標註出處）。
+
+[tools/build_nutrition.py](tools/build_nutrition.py) 會下載原始資料，只留下需要的營養素，轉成 [data/nutrition.json](data/nutrition.json)，跟著 App 一起部署並快取，離線也能查。資料大約每 3 個月更新一次，要更新時：
+
+```bash
+python3 tools/build_nutrition.py
+```
+
+然後照「發佈新版」的步驟把 `sw.js` 的 `VERSION` 加一再 push。
+
+材料與食品的對應、每單位重量會存在手機上，也包含在匯出的備份檔裡。同名的材料（例如「雞蛋」）在所有食譜共用同一個對應。
 
 純 HTML / CSS / JavaScript，沒有 build 步驟。
 
@@ -50,5 +65,8 @@ sw.js                  Service Worker：離線快取與更新
 css/styles.css         樣式（含深色模式）
 js/app.js              畫面與功能
 js/db.js               IndexedDB 存取
+js/nutrition.js        營養資料搜尋與計算
+data/nutrition.json    營養資料（由 tools/build_nutrition.py 產生）
+tools/                 資料轉換腳本
 icons/                 App 圖示
 ```

@@ -1,4 +1,5 @@
 import * as db from './db.js';
+import * as N from './nutrition.js';
 
 /* ---------- 常數 ---------- */
 
@@ -26,6 +27,9 @@ const state = {
   tag: {},        // 每個分頁選取的標籤
   dirty: false,   // 編輯中有未儲存的變更
   wakeLock: null,
+  nutriOpen: false, // 食譜頁「營養估算」是否展開
+  nq: '',           // 營養查詢的搜尋字
+  ncat: null,       // 營養查詢選取的分類
   persistAsked: false,
 };
 
@@ -243,7 +247,8 @@ async function renderItem(id) {
           <button type="button" id="sUp" aria-label="增加倍數">＋</button>
         </div>
       </div>
-      <ul class="ing" id="ing"></ul></section>` : ''}
+      <ul class="ing" id="ing"></ul></section>
+      <section id="nutri" class="nutri"></section>` : ''}
     ${hasSteps ? `<section><h3>步驟</h3><ol class="steps" id="steps">${renderSteps(it.steps, checked)}</ol></section>` : ''}
     ${it.body ? `<section>${it.type === 'note' ? '' : '<h3>備註</h3>'}<div class="body">${linkify(it.body)}</div></section>` : ''}
     <p class="d-time">建立 ${fmtDate(it.createdAt)} · 更新 ${fmtDate(it.updatedAt)}</p>
@@ -259,8 +264,44 @@ async function renderItem(id) {
       $('#sOut').textContent = fmtNum(f) + '×';
       $('#sOut').classList.toggle('changed', f !== 1);
     }
+    drawNutrition();
+  };
+
+  // 營養估算：資料載入後才顯示
+  let nutri = null;
+  const drawNutrition = () => {
+    if (!nutri || !hasIng) return;
+    const { data, maps } = nutri;
+    const r = N.computeNutrition(data, it.ingredients, f, maps);
+    const servN = parseFloat((it.servings || '').match(/\d+(?:\.\d+)?/)?.[0]);
+    const per = servN > 0 ? servN * f : null;
+    const kcal = (v) => N.fmtValue(v, 'kcal');
+    const summary = !r.counted ? '尚未對應材料'
+      : per ? `每份約 ${kcal(r.totals[0] / per)} kcal` : `全部約 ${kcal(r.totals[0])} kcal`;
+    const unit = (u) => `<small>${u}</small>`;
+    $('#nutri').innerHTML = `<details id="nutriBox"${state.nutriOpen ? ' open' : ''}>
+      <summary><h3>營養估算</h3><span class="n-sum">${esc(summary)}</span></summary>
+      ${r.counted ? `<table class="ntable">
+        <thead><tr><th></th><th>全部</th>${per ? `<th>每份<small>（${fmtNum(per)} 份）</small></th>` : ''}</tr></thead>
+        <tbody>${data.nutrients.map(([, name, u], i) => `<tr><th>${esc(name)}</th>
+          <td>${N.fmtValue(r.totals[i], u)} ${unit(u)}</td>
+          ${per ? `<td>${N.fmtValue(r.totals[i] / per, u)} ${unit(u)}</td>` : ''}</tr>`).join('')}</tbody>
+      </table>` : ''}
+      ${r.pending ? `<p class="warn">還有 ${r.pending} 項材料沒有計入，數值會偏低。點下方材料來設定。</p>` : ''}
+      <ul class="nmap">${r.rows.map((row) => `<li><a href="#/match/${encodeURIComponent(it.id)}/${row.k}">
+        <span class="nm-line">${esc(scaleLine(row.line, f))}</span>
+        <span class="nm-status ${row.status}">${esc(statusText(row))}</span></a></li>`).join('')}</ul>
+      ${per ? '' : '<p class="muted">在「份量」填上數字（例如 4 人份），就會顯示每份的營養。</p>'}
+      <p class="muted">依衛福部食藥署「食品營養成分資料集」估算，僅供參考。</p>
+    </details>`;
+    $('#nutriBox').addEventListener('toggle', (e) => { state.nutriOpen = e.target.open; });
   };
   drawScaled();
+  if (hasIng) {
+    Promise.all([N.loadFoods(), N.loadMappings()])
+      .then(([data, maps]) => { nutri = { data, maps }; drawNutrition(); })
+      .catch(() => { $('#nutri').innerHTML = '<p class="muted">營養資料載入失敗。</p>'; });
+  }
 
   const step = (dir) => {
     const idx = SCALES.indexOf(f);
@@ -304,6 +345,229 @@ async function renderItem(id) {
     });
   }
   return it.type;
+}
+
+function statusText(row) {
+  const u = N.unitLabel(row.unit);
+  switch (row.status) {
+    case 'ok': return `${row.food.name} · ${N.fmtGrams(row.grams)} g`;
+    case 'ignored': return '不計入';
+    case 'noqty': return `${row.food.name} · 缺少數量`;
+    case 'needweight': return `${row.food.name} · 請填 1 ${u} 的重量`;
+    default: return '尚未對應 ›';
+  }
+}
+
+/* ---------- 材料對應營養資料 ---------- */
+
+function foodRow(f, data, { link = false, selected = false } = {}) {
+  const kcal = f.v[0];
+  const inner = `<div class="f-main"><div class="f-name">${esc(f.name)}</div>
+      <div class="f-sub">${esc([f.cat, f.desc].filter(Boolean).join(' · '))}</div></div>
+    <div class="f-kcal">${kcal === null ? '—' : Math.round(kcal)}<small>kcal/100g</small></div>`;
+  return link
+    ? `<li><a class="frow" href="#/food/${encodeURIComponent(f.id)}">${inner}</a></li>`
+    : `<li><button type="button" class="frow${selected ? ' on' : ''}" data-id="${esc(f.id)}">${inner}</button></li>`;
+}
+
+async function renderMatch(itemId, k) {
+  const it = await db.get(itemId);
+  if (!it) return notFound();
+  const back = `#/item/${encodeURIComponent(it.id)}`;
+  const line = String(it.ingredients || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[k];
+  if (!line || isGroup(line)) { location.replace(back); return it.type; }
+
+  setTop({ back, title: '對應營養' });
+  $view.innerHTML = '<p class="empty">載入營養資料中…</p>';
+  const data = await N.loadFoods();
+  const maps = await N.loadMappings();
+  const p = N.parseIngredient(line);
+  const u = N.unitLabel(p.unit);
+
+  $view.innerHTML = `
+    <section class="panel">
+      <div class="m-line">${esc(line)}</div>
+      <p class="muted">材料名稱「${esc(p.name)}」· 數量 ${p.qty === null ? '未填' : fmtNum(p.qty) + ' ' + esc(u)}</p>
+      <div id="mcur"></div>
+    </section>
+    <h3 class="m-h">選擇對應的食品</h3>
+    <div class="searchbar"><input type="search" id="mq" value="${esc(p.name)}" placeholder="搜尋食品…" autocomplete="off" enterkeyhint="search"></div>
+    <p class="muted" id="mhint"></p>
+    <ul class="flist" id="flist"></ul>`;
+
+  const save = async () => {
+    await Promise.all([db.setKV(N.MAP_KEY, maps.map), db.setKV(N.WEIGHT_KEY, maps.weights)]);
+    requestPersist();
+  };
+
+  const drawCurrent = () => {
+    const target = maps.map[p.name];
+    const food = target && target !== N.IGNORE ? data.byId.get(target) : null;
+    const shared = `<p class="muted">其他食譜裡名稱同樣是「${esc(p.name)}」的材料，也會套用這個設定。</p>`;
+    let html;
+    if (target === N.IGNORE) {
+      html = `<p>目前設定為<b>不計入營養</b>。</p>
+        <div class="btns"><button type="button" class="btn small" data-act="unset">改回計入</button>
+        <a class="btn small primary" href="${back}">完成</a></div>${shared}`;
+    } else if (food) {
+      const pu = N.gramsPerUnit(food, p.unit, maps.weights);
+      let amount = '';
+      if (p.qty === null) {
+        amount = '<p class="warn">這行材料沒有數量，請在食譜裡寫上數量（例如「200 g」或「2 顆」）才能計算。</p>';
+      } else if (pu.source === 'mass') {
+        amount = `<p>共 <b>${N.fmtGrams(p.qty * pu.g)} g</b></p>`;
+      } else {
+        const hint = { saved: '你設定的重量', default: '常用預設值，可以修改', dataset: '資料庫的參考重量，可以修改', none: '請填寫重量' }[pu.source];
+        amount = `<label class="field inline"><span>1 ${esc(u)} 約幾克</span>
+            <input id="ug" type="number" inputmode="decimal" step="any" min="0" value="${pu.g ?? ''}"></label>
+          <p class="muted">${hint}</p>
+          <p id="mtotal">${pu.g ? `共約 <b>${N.fmtGrams(p.qty * pu.g)} g</b>` : ''}</p>`;
+      }
+      html = `<p>對應到：<a href="#/food/${encodeURIComponent(food.id)}"><b>${esc(food.name)}</b></a>
+          <span class="muted">${esc(food.desc)}</span></p>${amount}
+        <div class="btns"><a class="btn small primary" href="${back}">完成</a>
+          <button type="button" class="btn small" data-act="unset">解除對應</button></div>${shared}`;
+    } else {
+      html = `<p class="muted">從下方選擇最接近的食品。像水這種不需要計算的材料，可以設為不計入。</p>
+        <div class="btns"><button type="button" class="btn small" data-act="ignore">不計入營養</button></div>`;
+    }
+    $('#mcur').innerHTML = html;
+    const ug = $('#ug');
+    if (ug) {
+      ug.addEventListener('input', () => {
+        const g = parseFloat(ug.value);
+        $('#mtotal').innerHTML = g > 0 ? `共約 <b>${N.fmtGrams(p.qty * g)} g</b>` : '';
+      });
+      ug.addEventListener('change', async () => {
+        const g = parseFloat(ug.value);
+        const key = N.weightKey(food.id, p.unit);
+        if (g > 0) maps.weights[key] = g; else delete maps.weights[key];
+        await save();
+        toast('已記住重量');
+      });
+    }
+  };
+
+  const drawList = () => {
+    const target = maps.map[p.name];
+    const r = N.searchFoods(data, $('#mq').value);
+    $('#mhint').textContent = r.fuzzy ? `找不到完全符合的，以下是「${r.used}」的結果` : (r.list.length ? '' : '找不到，換個關鍵字試試');
+    $('#flist').innerHTML = r.list.slice(0, 40).map((f) => foodRow(f, data, { selected: f.id === target })).join('');
+  };
+
+  drawCurrent();
+  drawList();
+
+  $('#mq').addEventListener('input', drawList);
+  $('#flist').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-id]');
+    if (!b) return;
+    maps.map[p.name] = b.dataset.id;
+    await save();
+    drawCurrent();
+    drawList();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    $('#ug')?.focus();
+  });
+  $('#mcur').addEventListener('click', async (e) => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (!act) return;
+    if (act === 'ignore') maps.map[p.name] = N.IGNORE;
+    if (act === 'unset') delete maps.map[p.name];
+    await save();
+    drawCurrent();
+    drawList();
+  });
+  return it.type;
+}
+
+/* ---------- 營養查詢 ---------- */
+
+function attribution(data) {
+  return `<p class="attr">資料來源：<a href="${esc(data.url)}" target="_blank" rel="noopener">${esc(data.source)}</a>，
+    依${esc(data.license)}使用（${esc(data.fetched)} 下載）。數值為每 100 克可食部分的分析結果，僅供參考。</p>`;
+}
+
+async function renderNutrition() {
+  setTop({ title: '營養查詢' });
+  $view.innerHTML = '<p class="empty">載入營養資料中…</p>';
+  const data = await N.loadFoods();
+  $view.innerHTML = `
+    <div class="searchbar"><input type="search" id="nq" placeholder="搜尋食材，例如：雞胸肉、地瓜"
+      value="${esc(state.nq)}" autocomplete="off" enterkeyhint="search"></div>
+    <div class="chips" id="ncats">${data.categories.map((c) =>
+      `<button type="button" class="chip${state.ncat === c ? ' on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+    <p class="muted" id="nhint"></p>
+    <ul class="flist" id="flist"></ul>
+    ${attribution(data)}`;
+
+  const LIMIT = 100;
+  const draw = () => {
+    const r = N.searchFoods(data, state.nq, state.ncat);
+    let hint = '';
+    if (!state.nq.trim() && !state.ncat) hint = `共 ${data.foods.length} 種食品。輸入名稱或選擇分類開始查詢。`;
+    else if (!r.list.length) hint = '找不到，換個關鍵字試試';
+    else if (r.fuzzy) hint = `找不到完全符合的，以下是「${r.used}」的結果`;
+    else if (r.list.length > LIMIT) hint = `共 ${r.list.length} 筆，只顯示前 ${LIMIT} 筆`;
+    $('#nhint').textContent = hint;
+    $('#flist').innerHTML = r.list.slice(0, LIMIT).map((f) => foodRow(f, data, { link: true })).join('');
+  };
+  draw();
+  $('#nq').addEventListener('input', (e) => { state.nq = e.target.value; draw(); });
+  $('#ncats').addEventListener('click', (e) => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    state.ncat = state.ncat === b.dataset.cat ? null : b.dataset.cat;
+    $view.querySelectorAll('#ncats .chip').forEach((c) => c.classList.toggle('on', c.dataset.cat === state.ncat));
+    draw();
+  });
+  return 'nutrition';
+}
+
+async function renderFood(id) {
+  setTop({ back: '#/nutrition', title: '營養成分' });
+  const data = await N.loadFoods();
+  const food = data.byId.get(id);
+  if (!food) { $view.innerHTML = '<p class="empty">找不到這個食品。</p>'; return 'nutrition'; }
+
+  $view.innerHTML = `<article class="detail">
+    <h2 class="d-title">${esc(food.name)}</h2>
+    <p class="muted">${esc(food.cat)}${food.alias ? ` · 又稱：${esc(food.alias)}` : ''}</p>
+    ${food.desc ? `<p class="muted">${esc(food.desc)}</p>` : ''}
+    <div class="amount">
+      <label class="field inline"><span>份量（克）</span>
+        <input id="fg" type="number" inputmode="decimal" step="any" min="0" value="100"></label>
+      <div class="btns">
+        <button type="button" class="btn small" data-g="100">100 g</button>
+        ${food.unit ? `<button type="button" class="btn small" data-g="${food.unit}">1 單位 ≈ ${N.fmtGrams(food.unit)} g</button>` : ''}
+      </div>
+    </div>
+    <table class="ntable">
+      <thead><tr><th></th><th>每 100 g</th><th id="fgh">100 g</th></tr></thead>
+      <tbody id="ftbody"></tbody>
+    </table>
+    <p class="muted">「—」表示資料庫沒有提供這項數值。</p>
+    ${attribution(data)}
+  </article>`;
+
+  const draw = () => {
+    const g = Math.max(0, parseFloat($('#fg').value) || 0);
+    $('#fgh').textContent = `${N.fmtGrams(g)} g`;
+    $('#ftbody').innerHTML = data.nutrients.map(([, name, u], i) => {
+      const v = food.v[i];
+      const cell = (x) => (x === null ? '—' : `${N.fmtValue(x, u)} <small>${u}</small>`);
+      return `<tr><th>${esc(name)}</th><td>${cell(v)}</td><td>${cell(v === null ? null : v * g / 100)}</td></tr>`;
+    }).join('');
+  };
+  draw();
+  $('#fg').addEventListener('input', draw);
+  $view.querySelector('.amount .btns').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-g]');
+    if (!b) return;
+    $('#fg').value = b.dataset.g;
+    draw();
+  });
+  return 'nutrition';
 }
 
 async function releaseWake() {
@@ -511,7 +775,11 @@ async function exportData() {
   const out = await Promise.all(items.map(async (i) => ({
     ...i, photo: i.photo ? await blobToDataURL(i.photo) : null,
   })));
-  const json = JSON.stringify({ app: 'janna', format: 1, exportedAt: new Date().toISOString(), items: out });
+  const maps = await N.loadMappings();
+  const json = JSON.stringify({
+    app: 'janna', format: 2, exportedAt: new Date().toISOString(), items: out,
+    kv: { [N.MAP_KEY]: maps.map, [N.WEIGHT_KEY]: maps.weights },
+  });
   const d = new Date();
   const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const name = `janna-backup-${stamp}.json`;
@@ -568,6 +836,19 @@ async function importData(file) {
     if (cur) updated++; else added++;
   }
   if (toWrite.length) await db.putMany(toWrite);
+
+  // 營養對應設定：合併，同一個 key 以備份檔為準
+  const kv = data.kv && typeof data.kv === 'object' ? data.kv : {};
+  const maps = await N.loadMappings();
+  const isObj = (x) => x && typeof x === 'object' && !Array.isArray(x);
+  if (isObj(kv[N.MAP_KEY])) {
+    for (const [k, v] of Object.entries(kv[N.MAP_KEY])) if (typeof v === 'string') maps.map[k] = v;
+    await db.setKV(N.MAP_KEY, maps.map);
+  }
+  if (isObj(kv[N.WEIGHT_KEY])) {
+    for (const [k, v] of Object.entries(kv[N.WEIGHT_KEY])) if (Number(v) > 0) maps.weights[k] = Number(v);
+    await db.setKV(N.WEIGHT_KEY, maps.weights);
+  }
   requestPersist();
   return { added, updated, skipped };
 }
@@ -612,7 +893,10 @@ async function renderSettings() {
     <section class="panel">
       <h3>關於</h3>
       <p class="muted">Janna · 版本 ${esc(version)}</p>
+      <div id="nsrc"></div>
     </section>`;
+
+  N.loadFoods().then((data) => { $('#nsrc').innerHTML = attribution(data); }).catch(() => {});
 
   $('#exp').addEventListener('click', async () => {
     try {
@@ -648,7 +932,7 @@ async function route() {
 
   const raw = location.hash.slice(1) || '/recipe';
   const [path, query = ''] = raw.split('?');
-  const [, name = 'recipe', arg = ''] = path.split('/');
+  const [, name = 'recipe', arg = '', arg2 = ''] = path.split('/');
   const params = new URLSearchParams(query);
 
   let tab = name;
@@ -662,6 +946,12 @@ async function route() {
       tab = await renderEdit(decodeURIComponent(arg));
     } else if (name === 'new') {
       tab = await renderEdit(null, TYPES[arg] ? arg : 'recipe');
+    } else if (name === 'match') {
+      tab = await renderMatch(decodeURIComponent(arg), Number(arg2));
+    } else if (name === 'nutrition') {
+      tab = await renderNutrition();
+    } else if (name === 'food') {
+      tab = await renderFood(decodeURIComponent(arg));
     } else if (name === 'settings') {
       tab = await renderSettings();
     } else {

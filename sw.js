@@ -1,5 +1,5 @@
 // 每次發佈新版時，把 VERSION 加一（例如 1.0.1），手機才會抓到新檔案。
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CACHE = 'janna-' + VERSION;
 
 const ASSETS = [
@@ -8,6 +8,8 @@ const ASSETS = [
   './css/styles.css',
   './js/app.js',
   './js/db.js',
+  './js/nutrition.js',
+  './data/nutrition.json',
   './manifest.webmanifest',
   './icons/apple-touch-icon.png',
   './icons/icon-192.png',
